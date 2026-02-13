@@ -6,7 +6,7 @@ An intelligent real-time monitoring system that uses computer vision to detect e
 
 🚀 Live Demo
 
-Access the hosted application here: [website->](wildlifeguardian.streamlit.app)
+->>Access the hosted application through description
 
 How to Use the Web Application
 
