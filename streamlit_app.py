@@ -7,7 +7,7 @@ Shows:
 """
 
 from collections import Counter, deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 
@@ -202,36 +202,40 @@ def classify_roi(roi, resources):
     device = resources["device"]
 
     if labels is None or roi.size == 0:
-        return "Animal", None
+        return "Unknown Animal", None
 
-    roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-    pil_image = Image.fromarray(roi_rgb)
-    input_tensor = preprocess(pil_image).unsqueeze(0)
-    if device == "cuda":
-        input_tensor = input_tensor.cuda()
+    try:
+        roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(roi_rgb)
+        input_tensor = preprocess(pil_image).unsqueeze(0)
+        if device == "cuda":
+            input_tensor = input_tensor.cuda()
 
-    with torch.no_grad():
-        output = classifier(input_tensor)
-        probabilities = torch.nn.functional.softmax(output[0], dim=0)
-        top5_prob, top5_idx = torch.topk(probabilities, 5)
+        with torch.no_grad():
+            output = classifier(input_tensor)
+            probabilities = torch.nn.functional.softmax(output[0], dim=0)
+            top5_prob, top5_idx = torch.topk(probabilities, 5)
 
-    for idx, prob in zip(top5_idx, top5_prob):
-        label_idx = int(idx.item())
-        prob_value = float(prob.item())
-        if label_idx >= len(labels):
-            continue
+        for idx, prob in zip(top5_idx, top5_prob):
+            label_idx = int(idx.item())
+            prob_value = float(prob.item())
+            if label_idx >= len(labels):
+                continue
 
-        raw_label = labels[label_idx]
-        normalized_label = normalize_label_text(raw_label)
-        category = get_species_category(raw_label)
+            raw_label = labels[label_idx]
+            normalized_label = normalize_label_text(raw_label)
+            category = get_species_category(raw_label)
 
-        if category:
-            return display_label_text(raw_label), category
-        if prob_value >= CONFIG["classification_conf"]:
-            if any(token in normalized_label for token in GENERIC_ANIMAL_TOKENS):
+            if category:
                 return display_label_text(raw_label), category
+            if prob_value >= CONFIG["classification_conf"]:
+                if any(token in normalized_label for token in GENERIC_ANIMAL_TOKENS):
+                    return display_label_text(raw_label), category
 
-    return "Animal", None
+    except Exception as e:
+        print(f"Error during ROI classification: {e}")
+    
+    return "Unknown Animal", None
 
 
 def draw_detection_label(frame, lines, x, y, color):
@@ -282,11 +286,16 @@ def detect_frame(frame, resources):
             confidence = float(box.conf[0])
             if class_id != 0 and class_id not in ANIMAL_CLASSES:
                 continue
+            
+            # For animal detections (not humans/poachers), require higher confidence to reduce false positives
+            if class_id != 0 and confidence < 0.65:
+                continue
 
             detections_count += 1
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cache_key = f"{class_id}_{x1//50}_{y1//50}"
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Use larger grid cells (100px) for cache key to tolerate motion/shaking
+            cache_key = f"{class_id}_{x1//100}_{y1//100}"
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             confidence_score = round(confidence, 3)
             confidence_pct = confidence * 100.0
 
@@ -306,20 +315,19 @@ def detect_frame(frame, resources):
                     f"Confidence: {confidence_pct:.2f}%",
                 ]
             else:
-                species_name = "Unknown"
+                species_name = "Unknown Animal"
                 species_category = None
                 cached = st.session_state.species_cache.get(cache_key)
                 if cached:
                     species_name, species_category, cache_frame = cached
-                    if st.session_state.frame_count - cache_frame > 30:
+                    # Extend cache timeout for stable detections
+                    if st.session_state.frame_count - cache_frame > 60:
                         st.session_state.species_cache.pop(cache_key, None)
-                        species_name = "Unknown"
+                        species_name = "Unknown Animal"
                         species_category = None
 
-                if (
-                    species_name == "Unknown"
-                    and st.session_state.frame_count % CONFIG["classify_every_n_frames"] == 0
-                ):
+                # Classify on first detection OR when cache expires
+                if species_name == "Unknown Animal":
                     roi = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
                     species_name, species_category = classify_roi(roi, resources)
                     st.session_state.species_cache[cache_key] = (
@@ -407,7 +415,7 @@ with controls_col2:
         st.session_state.monitor_error = None
         if st.session_state.intrusion_active_since is not None:
             st.session_state.intrusion_duration_seconds += (
-                datetime.now() - st.session_state.intrusion_active_since
+                datetime.now(timezone.utc) - st.session_state.intrusion_active_since
             ).total_seconds()
             st.session_state.intrusion_active_since = None
         release_camera()
@@ -439,7 +447,7 @@ def process_monitoring_frame():
     if not st.session_state.running:
         return
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     cap = get_camera()
     if not cap.isOpened():
         st.session_state.monitor_error = "Camera is not available."
@@ -567,7 +575,7 @@ def render_log_page(title, log_entries, empty_caption):
 def get_intrusion_duration_seconds():
     duration = st.session_state.intrusion_duration_seconds
     if st.session_state.intrusion_active_since is not None:
-        duration += (datetime.now() - st.session_state.intrusion_active_since).total_seconds()
+        duration += (datetime.now(timezone.utc) - st.session_state.intrusion_active_since).total_seconds()
     return max(0.0, duration)
 
 

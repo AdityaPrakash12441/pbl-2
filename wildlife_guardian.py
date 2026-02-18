@@ -172,7 +172,7 @@ ENDANGERED_SPECIES = {
 
 # Species cache to avoid re-classifying same objects
 species_cache = {}
-cache_timeout = 30  # frames
+cache_timeout = 60  # frames (extended for motion tolerance)
 
 # Access default webcam
 cap = cv2.VideoCapture(0)
@@ -219,14 +219,14 @@ while True:
     fps_frame_count += 1
     
     # Calculate FPS every second
-    if time.time() - fps_start_time >= 1.0:
+    """if time.time() - fps_start_time >= 1.0:
         current_fps = fps_frame_count / (time.time() - fps_start_time)
         fps_frame_count = 0
-        fps_start_time = time.time()
+        fps_start_time = time.time()"""
     
     # Run YOLOv8 detection with confidence threshold
     results = detector(frame, conf=CONFIG['yolo_conf'], verbose=False)
-    
+    time.sleep(2)
     threat_detected = False
     detected_species = []
     endangered_detected = False
@@ -245,26 +245,27 @@ while True:
                 # Get bounding box
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 
-                # Create cache key based on position and class
-                cache_key = f"{class_id}_{x1//50}_{y1//50}"
+                # Use larger grid cells (100px) for cache key to tolerate motion/shaking
+                cache_key = f"{class_id}_{x1//100}_{y1//100}"
                 
-                species_name = "Unknown"
+                species_name = "Unknown Animal"
                 
                 # For persons, no need to classify
                 if class_id == 0:
                     species_name = "Person/Poacher"
                     person_detected = True
-                # For animals, classify only every N frames or if not in cache
+                # For animals, classify on first detection or when cache expires
                 elif class_id in ANIMAL_CLASSES:
                     # Check cache first
                     if cache_key in species_cache:
                         species_name, cache_frame = species_cache[cache_key]
-                        # Invalidate cache after timeout
-                        if frame_count - cache_frame > cache_timeout:
+                        # Extend cache timeout for stable detections
+                        if frame_count - cache_frame > 60:
                             del species_cache[cache_key]
+                            species_name = "Unknown Animal"
                     
-                    # Classify if not cached and it's time to classify
-                    if species_name == "Unknown" and frame_count % CONFIG['classify_every_n_frames'] == 0:
+                    # Classify on first detection OR when cache expires
+                    if species_name == "Unknown Animal":
                         # Extract ROI for classification
                         roi = frame[max(0, y1):min(frame.shape[0], y2), 
                                    max(0, x1):min(frame.shape[1], x2)]
@@ -287,7 +288,7 @@ while True:
                                     top5_prob, top5_idx = torch.topk(probabilities, 5)
                                     
                                     # Try to find best match from top 5 predictions
-                                    species_name = "Animal"
+                                    species_name = "Unknown Animal"
                                     for idx, prob in zip(top5_idx, top5_prob):
                                         idx = idx.item()
                                         prob = prob.item()
@@ -311,9 +312,9 @@ while True:
                                     # Cache the result
                                     species_cache[cache_key] = (species_name, frame_count)
                             except Exception as e:
-                                species_name = "Animal"
+                                species_name = "Unknown Animal"
                         else:
-                            species_name = "Animal"
+                            species_name = "Unknown Animal"
                 
                 detected_species.append(species_name)
                 
